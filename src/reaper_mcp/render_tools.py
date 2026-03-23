@@ -1,248 +1,183 @@
 import os
+import logging
 from pathlib import Path
 
 import reapy
 from reapy import reascript_api as RPR
 
+from reaper_mcp.connection import get_project
 
-class RenderTools:
-    """Tools for rendering and exporting in REAPER."""
-    
-    def __init__(self, config):
+logger = logging.getLogger("reaper_mcp.render_tools")
+
+# REAPER RENDER_FORMAT codes
+FORMAT_CODES = {
+    "wav":  0,
+    "mp3":  3,
+    "ogg":  4,
+    "flac": 5,
+}
+
+# REAPER RENDER_FORMAT2 codes for WAV bit depth
+BIT_DEPTH_CODES = {
+    16: 0,
+    24: 2,
+    32: 4,
+}
+
+
+def _set_render_settings(
+    output_path: str,
+    format: str,
+    sample_rate: int,
+    bit_depth: int,
+    channels: int,
+    bounds: int,
+) -> None:
+    """Configure REAPER's render settings. bounds: 0=entire project, 1=time selection."""
+    fmt_code = FORMAT_CODES.get(format.lower(), 0)
+    bdepth_code = BIT_DEPTH_CODES.get(bit_depth, 2)
+    RPR.GetSetProjectInfo_String(0, "RENDER_FILE", output_path, True)
+    RPR.GetSetProjectInfo(0, "RENDER_FORMAT", fmt_code, True)
+    RPR.GetSetProjectInfo(0, "RENDER_FORMAT2", bdepth_code, True)
+    RPR.GetSetProjectInfo(0, "RENDER_SRATE", float(sample_rate), True)
+    RPR.GetSetProjectInfo(0, "RENDER_CHANNELS", float(channels), True)
+    RPR.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", float(bounds), True)
+
+
+def render_to_temp_file(sample_rate: int = 48000) -> str:
+    """
+    Render the current project to a temporary WAV file and return its path.
+    Used by analysis and mastering tools. Caller is responsible for deleting the file.
+    """
+    import tempfile
+    tmp = tempfile.mktemp(suffix=".wav")
+    _set_render_settings(tmp, "wav", sample_rate, 24, 2, bounds=0)
+    RPR.Main_OnCommand(41824, 0)
+    return tmp
+
+
+def register_tools(mcp):
+
+    @mcp.tool()
+    def render_project(
+        output_path: str,
+        format: str = "wav",
+        sample_rate: int = 48000,
+        bit_depth: int = 24,
+        channels: int = 2,
+    ) -> dict:
         """
-        Initialize RenderTools with configuration.
-        
-        Args:
-            config (dict): Configuration dictionary
-        """
-        self.config = config
-        self.default_sample_rate = config.get("default_sample_rate", 44100)
-        self.default_bit_depth = config.get("default_bit_depth", 24)
-        self.default_audio_format = config.get("default_audio_format", "wav")
-    
-    def render_project(self, output_path, format=None, sample_rate=None, bit_depth=None):
-        """
-        Render the project to the specified file.
-        
-        Args:
-            output_path (str): Output file path
-            format (str): Audio format (wav, mp3, flac, etc.)
-            sample_rate (int): Sample rate in Hz
-            bit_depth (int): Bit depth
-            
-        Returns:
-            dict: Result of the operation
+        Render the entire project to a file.
+        format: wav, flac, mp3 (requires LAME), ogg.
+        sample_rate: e.g. 44100, 48000, 96000.
+        bit_depth: 16, 24, or 32 (WAV only; ignored for mp3/ogg/flac).
+        channels: 1 (mono) or 2 (stereo).
         """
         try:
-            # Use default values if not specified
-            format = format or self.default_audio_format
-            sample_rate = sample_rate or self.default_sample_rate
-            bit_depth = bit_depth or self.default_bit_depth
-            
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-            
-            # Get project
-            project = reapy.Project()
-            
-            # Set render settings
-            # Note: This is a simplified implementation
-            # In practice, you'd need to use ReaScript API to set render settings
-            
-            # Render project
-            # Note: This is a simplified implementation
-            # In practice, you'd need to use ReaScript API to trigger rendering
-            
-            # For now, return placeholder values
+            output_path = str(Path(output_path).expanduser().resolve())
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            _set_render_settings(output_path, format, sample_rate, bit_depth, channels, bounds=0)
+            RPR.Main_OnCommand(41824, 0)  # File: Render project to disk (no dialog)
+            if not os.path.exists(output_path):
+                return {"success": False, "error": "Render command completed but output file not found"}
             return {
                 "success": True,
                 "output_path": output_path,
                 "format": format,
                 "sample_rate": sample_rate,
                 "bit_depth": bit_depth,
-                "message": "Note: This is a placeholder. Actual implementation would render the project."
+                "channels": channels,
+                "file_size_bytes": os.path.getsize(output_path),
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def render_stems(self, output_directory, tracks=None):
-        """
-        Render stems for the specified tracks.
-        
-        Args:
-            output_directory (str): Output directory
-            tracks (list): List of track IDs to render (None for all)
-            
-        Returns:
-            dict: Result of the operation
-        """
+            logger.error(f"render_project failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def render_time_selection(
+        output_path: str,
+        start: float,
+        end: float,
+        format: str = "wav",
+        sample_rate: int = 48000,
+        bit_depth: int = 24,
+        channels: int = 2,
+    ) -> dict:
+        """Render a specific time range of the project to a file."""
         try:
-            # Ensure directory exists
-            os.makedirs(output_directory, exist_ok=True)
-            
-            # Get project
-            project = reapy.Project()
-            
-            # Get tracks to render
-            track_list = []
-            if tracks is None:
-                # Render all tracks
-                for i in range(project.n_tracks):
-                    track = project.tracks[i]
-                    track_list.append({
-                        "track_id": track.id,
-                        "name": track.name
-                    })
-            else:
-                # Render specified tracks
-                for track_id in tracks:
-                    try:
-                        track = reapy.Track.from_id(track_id)
-                        track_list.append({
-                            "track_id": track_id,
-                            "name": track.name
-                        })
-                    except Exception as e:
-                        print(f"Error getting track {track_id}: {e}")
-            
-            # Render stems
-            # Note: This is a simplified implementation
-            # In practice, you'd need to use ReaScript API to render stems
-            
-            # For now, return placeholder values
+            output_path = str(Path(output_path).expanduser().resolve())
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            project = get_project()
+            project.time_selection = (start, end)
+            _set_render_settings(output_path, format, sample_rate, bit_depth, channels, bounds=1)
+            RPR.Main_OnCommand(41824, 0)
+            if not os.path.exists(output_path):
+                return {"success": False, "error": "Render completed but output file not found"}
             return {
                 "success": True,
-                "output_directory": output_directory,
-                "tracks": track_list,
-                "message": "Note: This is a placeholder. Actual implementation would render stems for each track."
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def render_selected_items(self, output_directory, format=None, sample_rate=None, bit_depth=None):
-        """
-        Render selected items as separate files.
-        
-        Args:
-            output_directory (str): Output directory
-            format (str): Audio format (wav, mp3, flac, etc.)
-            sample_rate (int): Sample rate in Hz
-            bit_depth (int): Bit depth
-            
-        Returns:
-            dict: Result of the operation
-        """
-        try:
-            # Use default values if not specified
-            format = format or self.default_audio_format
-            sample_rate = sample_rate or self.default_sample_rate
-            bit_depth = bit_depth or self.default_bit_depth
-            
-            # Ensure directory exists
-            os.makedirs(output_directory, exist_ok=True)
-            
-            # Get project
-            project = reapy.Project()
-            
-            # Get selected items
-            selected_items = project.selected_items
-            
-            if not selected_items:
-                return {
-                    "success": False,
-                    "error": "No items selected"
-                }
-            
-            # Render items
-            # Note: This is a simplified implementation
-            # In practice, you'd need to use ReaScript API to render items
-            
-            # For now, return placeholder values
-            item_list = []
-            for item in selected_items:
-                item_list.append({
-                    "item_id": item.id,
-                    "name": item.name or f"Item {item.id}"
-                })
-            
-            return {
-                "success": True,
-                "output_directory": output_directory,
+                "output_path": output_path,
+                "start": start,
+                "end": end,
                 "format": format,
-                "sample_rate": sample_rate,
-                "bit_depth": bit_depth,
-                "items": item_list,
-                "message": "Note: This is a placeholder. Actual implementation would render selected items."
+                "file_size_bytes": os.path.getsize(output_path),
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def render_regions(self, output_directory, format=None, sample_rate=None, bit_depth=None):
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def render_stems(
+        output_directory: str,
+        track_indices: list = None,
+        format: str = "wav",
+        sample_rate: int = 48000,
+        bit_depth: int = 24,
+    ) -> dict:
         """
-        Render regions as separate files.
-        
-        Args:
-            output_directory (str): Output directory
-            format (str): Audio format (wav, mp3, flac, etc.)
-            sample_rate (int): Sample rate in Hz
-            bit_depth (int): Bit depth
-            
-        Returns:
-            dict: Result of the operation
+        Render each track as a separate stem file by soloing each track individually.
+        track_indices: list of track indices, or null to render all tracks.
+        Files are named after the track names in the output directory.
         """
         try:
-            # Use default values if not specified
-            format = format or self.default_audio_format
-            sample_rate = sample_rate or self.default_sample_rate
-            bit_depth = bit_depth or self.default_bit_depth
-            
-            # Ensure directory exists
+            output_directory = str(Path(output_directory).expanduser().resolve())
             os.makedirs(output_directory, exist_ok=True)
-            
-            # Get project
-            project = reapy.Project()
-            
-            # Get regions
-            regions = []
-            for i in range(project.n_regions):
-                region = project.get_region(i)
-                regions.append({
-                    "index": i,
-                    "name": region.name,
-                    "start": region.start,
-                    "end": region.end
+            project = get_project()
+            indices = track_indices if track_indices is not None else list(range(project.n_tracks))
+            rendered = []
+
+            for idx in indices:
+                track = project.tracks[idx]
+                track_name = track.name or f"Track_{idx}"
+                # Solo this track exclusively
+                for j in range(project.n_tracks):
+                    project.tracks[j].solo = (j == idx)
+                # Sanitize filename
+                safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in track_name)
+                stem_path = os.path.join(output_directory, f"{safe_name}.{format}")
+                _set_render_settings(stem_path, format, sample_rate, bit_depth, 2, bounds=0)
+                RPR.Main_OnCommand(41824, 0)
+                rendered.append({
+                    "track_index": idx,
+                    "track_name": track_name,
+                    "output_path": stem_path,
+                    "exists": os.path.exists(stem_path),
                 })
-            
-            if not regions:
-                return {
-                    "success": False,
-                    "error": "No regions found"
-                }
-            
-            # Render regions
-            # Note: This is a simplified implementation
-            # In practice, you'd need to use ReaScript API to render regions
-            
+
+            # Unsolo all tracks
+            for j in range(project.n_tracks):
+                project.tracks[j].solo = False
+
             return {
                 "success": True,
                 "output_directory": output_directory,
-                "format": format,
-                "sample_rate": sample_rate,
-                "bit_depth": bit_depth,
-                "regions": regions,
-                "message": "Note: This is a placeholder. Actual implementation would render regions."
+                "stems": rendered,
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            # Always unsolo on error
+            try:
+                proj = get_project()
+                for j in range(proj.n_tracks):
+                    proj.tracks[j].solo = False
+            except Exception:
+                pass
+            logger.error(f"render_stems failed: {e}")
+            return {"success": False, "error": str(e)}

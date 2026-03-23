@@ -1,93 +1,44 @@
 import json
 import os
 from pathlib import Path
+from platformdirs import user_config_dir
 
+CONFIG_DIR = Path(user_config_dir("reaper-mcp"))
+DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
-    "reaper_path": "",
     "default_project_directory": str(Path.home() / "Documents" / "REAPER Projects"),
-    "vst_directories": [],
-    "sample_libraries": [],
     "default_tempo": 120.0,
     "default_time_signature": "4/4",
-    "default_sample_rate": 44100,
+    "default_sample_rate": 48000,
     "default_bit_depth": 24,
     "default_audio_format": "wav",
-    "mastering_presets": {
-        "default": [
-            {"name": "ReaEQ", "params": {}},
-            {"name": "ReaComp", "params": {"threshold": -18.0, "ratio": 2.0}},
-            {"name": "ReaLimit", "params": {"threshold": -0.5, "release": 50.0}}
-        ],
-        "loud": [
-            {"name": "ReaEQ", "params": {}},
-            {"name": "ReaComp", "params": {"threshold": -20.0, "ratio": 4.0}},
-            {"name": "ReaComp", "params": {"threshold": -12.0, "ratio": 2.0}},
-            {"name": "ReaLimit", "params": {"threshold": -0.1, "release": 30.0}}
-        ],
-        "gentle": [
-            {"name": "ReaEQ", "params": {}},
-            {"name": "ReaComp", "params": {"threshold": -16.0, "ratio": 1.5}},
-            {"name": "ReaLimit", "params": {"threshold": -1.0, "release": 100.0}}
-        ]
-    }
 }
 
 
-def load_config(config_path):
-    """
-    Load configuration from a JSON file.
-    If the file doesn't exist, create it with default values.
-    
-    Args:
-        config_path (str): Path to the configuration file
-        
-    Returns:
-        dict: Configuration dictionary
-    """
-    config_path = Path(config_path)
-    
-    # If config file doesn't exist, create it with default values
-    if not config_path.exists():
-        os.makedirs(config_path.parent, exist_ok=True)
-        with open(config_path, 'w') as f:
+def load_config(config_path=None) -> dict:
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+    if not path.exists():
+        os.makedirs(path.parent, exist_ok=True)
+        with open(path, "w") as f:
             json.dump(DEFAULT_CONFIG, f, indent=2)
-        return DEFAULT_CONFIG
-    
-    # Load config from file
+        return DEFAULT_CONFIG.copy()
     try:
-        with open(config_path, 'r') as f:
+        with open(path) as f:
             config = json.load(f)
-        
-        # Update with any missing default values
-        for key, value in DEFAULT_CONFIG.items():
-            if key not in config:
-                config[key] = value
-        
+        for k, v in DEFAULT_CONFIG.items():
+            config.setdefault(k, v)
         return config
-    except Exception as e:
-        print(f"Error loading configuration: {e}")
-        print("Using default configuration")
-        return DEFAULT_CONFIG
+    except Exception:
+        return DEFAULT_CONFIG.copy()
 
 
-def save_config(config, config_path):
-    """
-    Save configuration to a JSON file.
-    
-    Args:
-        config (dict): Configuration dictionary
-        config_path (str): Path to the configuration file
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
+def save_config(config: dict, config_path=None) -> bool:
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
     try:
-        config_path = Path(config_path)
-        os.makedirs(config_path.parent, exist_ok=True)
-        with open(config_path, 'w') as f:
+        os.makedirs(path.parent, exist_ok=True)
+        with open(path, "w") as f:
             json.dump(config, f, indent=2)
         return True
-    except Exception as e:
-        print(f"Error saving configuration: {e}")
+    except Exception:
         return False

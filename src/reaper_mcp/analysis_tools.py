@@ -1,222 +1,224 @@
+import os
+import logging
+
 import numpy as np
 import reapy
 from reapy import reascript_api as RPR
 
+from reaper_mcp.connection import get_project
 
-class AnalysisTools:
-    """Tools for audio analysis and feedback in REAPER."""
-    
-    def __init__(self, config):
+logger = logging.getLogger("reaper_mcp.analysis_tools")
+
+
+def _band_rms_db(D: np.ndarray, freqs: np.ndarray, lo: float, hi: float) -> float:
+    mask = (freqs >= lo) & (freqs <= hi)
+    if not mask.any():
+        return -120.0
+    power = float(np.mean(D[mask, :] ** 2))
+    return float(10 * np.log10(power + 1e-12))
+
+
+def register_tools(mcp):
+
+    @mcp.tool()
+    def analyze_frequency_spectrum() -> dict:
         """
-        Initialize AnalysisTools with configuration.
-        
-        Args:
-            config (dict): Configuration dictionary
-        """
-        self.config = config
-    
-    def analyze_frequency_spectrum(self, item_id=None):
-        """
-        Analyze the frequency spectrum of the specified item or project.
-        
-        Args:
-            item_id (int, optional): Item ID (None for entire project)
-            
-        Returns:
-            dict: Frequency analysis results
+        Render the project and analyze frequency band levels.
+        Returns RMS level in dB for seven bands:
+        sub_bass (20–60Hz), bass (60–250Hz), low_mids (250–500Hz),
+        mids (500–2kHz), high_mids (2–4kHz), presence (4–8kHz), brilliance (8–20kHz).
         """
         try:
-            # This is a simplified implementation
-            # In practice, you'd need to:
-            # 1. Get audio data from REAPER
-            # 2. Perform FFT analysis
-            # 3. Process and return results
-            
-            # For now, return placeholder values
-            frequency_bands = {
-                "sub_bass": {"range": "20-60 Hz", "level": -18.0},
-                "bass": {"range": "60-250 Hz", "level": -12.0},
-                "low_mids": {"range": "250-500 Hz", "level": -10.0},
-                "mids": {"range": "500-2000 Hz", "level": -8.0},
-                "high_mids": {"range": "2000-4000 Hz", "level": -10.0},
-                "presence": {"range": "4000-8000 Hz", "level": -12.0},
-                "brilliance": {"range": "8000-20000 Hz", "level": -15.0}
+            import librosa
+            import soundfile as sf
+            from reaper_mcp.render_tools import render_to_temp_file
+
+            tmp = render_to_temp_file()
+            try:
+                y, sr = librosa.load(tmp, sr=None, mono=True)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+
+            D = np.abs(librosa.stft(y))
+            freqs = librosa.fft_frequencies(sr=sr)
+
+            bands = {
+                "sub_bass":   (20,   60),
+                "bass":       (60,   250),
+                "low_mids":   (250,  500),
+                "mids":       (500,  2000),
+                "high_mids":  (2000, 4000),
+                "presence":   (4000, 8000),
+                "brilliance": (8000, min(20000, sr // 2)),
             }
-            
-            if item_id:
-                # Get item name for context
-                try:
-                    item = reapy.Item.from_id(item_id)
-                    item_name = item.name or f"Item {item_id}"
-                except:
-                    item_name = f"Item {item_id}"
-                
-                return {
-                    "success": True,
-                    "item_id": item_id,
-                    "item_name": item_name,
-                    "frequency_bands": frequency_bands,
-                    "message": "Note: These are placeholder values. Actual implementation would analyze audio data."
+
+            results = {
+                name: {
+                    "range_hz": f"{lo}–{hi}",
+                    "level_db": round(_band_rms_db(D, freqs, lo, hi), 1),
                 }
+                for name, (lo, hi) in bands.items()
+            }
+
+            return {"success": True, "frequency_bands": results}
+        except Exception as e:
+            logger.error(f"analyze_frequency_spectrum failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def detect_clipping() -> dict:
+        """
+        Render the project and detect digital clipping (samples at or above 0 dBFS).
+        Returns clipped sample count, peak level in dB, and whether clipping was found.
+        """
+        try:
+            import soundfile as sf
+            from reaper_mcp.render_tools import render_to_temp_file
+
+            tmp = render_to_temp_file()
+            try:
+                data, rate = sf.read(tmp)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+
+            if data.ndim > 1:
+                mono = np.max(np.abs(data), axis=1)
             else:
-                return {
-                    "success": True,
-                    "scope": "entire_project",
-                    "frequency_bands": frequency_bands,
-                    "message": "Note: These are placeholder values. Actual implementation would analyze audio data."
-                }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def detect_clipping(self):
-        """
-        Detect clipping in the project.
-        
-        Returns:
-            dict: Clipping detection results
-        """
-        try:
-            # This is a simplified implementation
-            # In practice, you'd need to analyze audio levels throughout the project
-            
-            # For now, return placeholder values
+                mono = np.abs(data)
+
+            clip_threshold = 0.9999
+            clipped_samples = int(np.sum(mono >= clip_threshold))
+            peak_linear = float(np.max(mono))
+            peak_db = float(20 * np.log10(peak_linear)) if peak_linear > 0 else -120.0
+
             return {
                 "success": True,
-                "clipping_detected": False,
-                "max_peak": -1.2,
-                "message": "Note: These are placeholder values. Actual implementation would analyze audio levels."
+                "clipping_detected": clipped_samples > 0,
+                "clipped_samples": clipped_samples,
+                "peak_db": round(peak_db, 2),
+                "peak_linear": round(peak_linear, 4),
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def analyze_mix_balance(self):
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def analyze_dynamics() -> dict:
         """
-        Analyze the mix balance across the frequency spectrum.
-        
-        Returns:
-            dict: Mix balance analysis results
+        Render the project and measure dynamic range: RMS, peak, crest factor,
+        and a simplified DR score (average peak-to-RMS over 3-second blocks).
         """
         try:
-            # This is a simplified implementation
-            # In practice, you'd need to analyze the frequency content of all tracks
-            
-            # For now, return placeholder values
-            track_analysis = []
-            
-            project = reapy.Project()
-            for i in range(project.n_tracks):
-                track = project.tracks[i]
-                track_analysis.append({
-                    "track_id": track.id,
-                    "name": track.name,
-                    "dominant_frequency_range": "500-2000 Hz",
-                    "level": -15.0
-                })
-            
+            import soundfile as sf
+            from reaper_mcp.render_tools import render_to_temp_file
+
+            tmp = render_to_temp_file()
+            try:
+                data, rate = sf.read(tmp)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+
+            mono = np.mean(data, axis=1) if data.ndim > 1 else data
+            rms = float(np.sqrt(np.mean(mono ** 2)))
+            peak = float(np.max(np.abs(mono)))
+            rms_db = float(20 * np.log10(rms)) if rms > 0 else -120.0
+            peak_db = float(20 * np.log10(peak)) if peak > 0 else -120.0
+            crest_db = peak_db - rms_db
+
+            # Simplified DR score: average crest factor over 3-second blocks
+            block_size = rate * 3
+            n_blocks = len(mono) // block_size
+            dr_scores = []
+            for i in range(n_blocks):
+                block = mono[i * block_size:(i + 1) * block_size]
+                blk_peak = np.max(np.abs(block))
+                blk_rms = np.sqrt(np.mean(block ** 2))
+                if blk_rms > 0:
+                    dr_scores.append(float(20 * np.log10(blk_peak / blk_rms)))
+            dr = float(np.mean(dr_scores)) if dr_scores else 0.0
+
             return {
                 "success": True,
-                "track_analysis": track_analysis,
-                "overall_balance": "Good",
-                "recommendations": [
-                    "Consider reducing low-mid buildup around 300 Hz",
-                    "High-end (8-12 kHz) could be enhanced for more clarity"
-                ],
-                "message": "Note: These are placeholder values. Actual implementation would analyze frequency content."
+                "rms_db": round(rms_db, 1),
+                "peak_db": round(peak_db, 1),
+                "crest_factor_db": round(crest_db, 1),
+                "dr_score": round(dr, 1),
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def analyze_stereo_field(self):
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def analyze_stereo_field() -> dict:
         """
-        Analyze the stereo field of the mix.
-        
-        Returns:
-            dict: Stereo field analysis results
+        Render the project and analyze stereo width and mono compatibility.
+        Returns mid/side balance, stereo width ratio, and L/R correlation.
+        Correlation near 1 = mono-like, near 0 = wide stereo, negative = phase issues.
         """
         try:
-            # This is a simplified implementation
-            # In practice, you'd need to analyze the stereo content of the mix
-            
-            # For now, return placeholder values
+            import soundfile as sf
+            from reaper_mcp.render_tools import render_to_temp_file
+
+            tmp = render_to_temp_file()
+            try:
+                data, rate = sf.read(tmp)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+
+            if data.ndim < 2 or data.shape[1] < 2:
+                return {"success": False, "error": "Project rendered as mono; cannot analyze stereo field"}
+
+            L, R = data[:, 0], data[:, 1]
+            mid = (L + R) / 2
+            side = (L - R) / 2
+            mid_rms = float(np.sqrt(np.mean(mid ** 2)))
+            side_rms = float(np.sqrt(np.mean(side ** 2)))
+            width_ratio = side_rms / (mid_rms + 1e-10)
+            correlation = float(np.corrcoef(L, R)[0, 1])
+
             return {
                 "success": True,
-                "stereo_width": "Medium",
-                "phase_issues": False,
-                "mono_compatibility": "Good",
-                "recommendations": [
-                    "Bass frequencies are well-centered",
-                    "Consider widening high-frequency content for more immersion"
-                ],
-                "message": "Note: These are placeholder values. Actual implementation would analyze stereo content."
+                "stereo_width_ratio": round(width_ratio, 3),
+                "lr_correlation": round(correlation, 3),
+                "mid_rms_db": round(float(20 * np.log10(mid_rms + 1e-10)), 1),
+                "side_rms_db": round(float(20 * np.log10(side_rms + 1e-10)), 1),
+                "mono_compatible": correlation > 0.0,
+                "notes": (
+                    "width_ratio: 0=mono, >0.5=wide stereo. "
+                    "lr_correlation: 1=mono, 0=fully wide, <0=phase problems."
+                ),
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def analyze_dynamics(self):
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def analyze_transients() -> dict:
         """
-        Analyze the dynamics of the mix.
-        
-        Returns:
-            dict: Dynamics analysis results
+        Render the project and detect transient events (note attacks, drum hits, etc.).
+        Returns the count and timing of up to 100 transient onset events.
         """
         try:
-            # This is a simplified implementation
-            # In practice, you'd need to analyze the dynamic range of the mix
-            
-            # For now, return placeholder values
+            import librosa
+            from reaper_mcp.render_tools import render_to_temp_file
+
+            tmp = render_to_temp_file(sample_rate=44100)
+            try:
+                y, sr = librosa.load(tmp, sr=None, mono=True)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+
+            onset_frames = librosa.onset.onset_detect(y=y, sr=sr, units="frames")
+            onset_times = librosa.frames_to_time(onset_frames, sr=sr).tolist()
+            capped = onset_times[:100]
+
             return {
                 "success": True,
-                "dynamic_range": 8.5,
-                "crest_factor": 12.0,
-                "rms_level": -18.0,
-                "peak_level": -6.0,
-                "recommendations": [
-                    "Dynamic range is appropriate for the genre",
-                    "Consider less compression on drum overheads for more natural sound"
-                ],
-                "message": "Note: These are placeholder values. Actual implementation would analyze dynamic range."
+                "onset_count": len(onset_times),
+                "onset_times_seconds": [round(t, 3) for t in capped],
+                "note": "Showing up to 100 events" if len(onset_times) > 100 else None,
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def analyze_transients(self):
-        """
-        Analyze transients in the mix.
-        
-        Returns:
-            dict: Transient analysis results
-        """
-        try:
-            # This is a simplified implementation
-            # In practice, you'd need to analyze transients in the audio
-            
-            # For now, return placeholder values
-            return {
-                "success": True,
-                "transient_clarity": "Good",
-                "recommendations": [
-                    "Kick drum transients are well-preserved",
-                    "Snare could benefit from more attack"
-                ],
-                "message": "Note: These are placeholder values. Actual implementation would analyze transients."
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            return {"success": False, "error": str(e)}

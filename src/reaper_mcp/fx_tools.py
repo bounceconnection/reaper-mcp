@@ -1,307 +1,155 @@
-import os
-from pathlib import Path
+import logging
 
 import reapy
 from reapy import reascript_api as RPR
 
+from reaper_mcp.connection import get_project
 
-class FXTools:
-    """Tools for managing VST instruments and effects in REAPER."""
-    
-    def __init__(self, config):
+logger = logging.getLogger("reaper_mcp.fx_tools")
+
+
+def register_tools(mcp):
+
+    @mcp.tool()
+    def add_fx(track_index: int, fx_name: str) -> dict:
         """
-        Initialize FXTools with configuration.
-        
-        Args:
-            config (dict): Configuration dictionary
-        """
-        self.config = config
-        self.vst_directories = config.get("vst_directories", [])
-    
-    def add_vst_instrument(self, track_id, vst_name):
-        """
-        Add a VST instrument to the specified track.
-        
-        Args:
-            track_id (int): Track ID
-            vst_name (str): VST instrument name
-            
-        Returns:
-            dict: FX information
+        Add an FX plugin to a track. Works for both instruments (VSTi) and effects (VST/AU).
+        Use the exact plugin name as shown in REAPER's FX browser.
+        Built-in Cockos plugins: ReaEQ, ReaComp, ReaDelay, ReaVerb, ReaLimit, ReaSynth,
+        ReaSamplOmatic5000, ReaTune, ReaGate, ReaFIR, ReaXcomp.
         """
         try:
-            # Get track by ID
-            track = reapy.Track.from_id(track_id)
-            
-            # Add VST instrument
-            fx_index = track.add_fx(vst_name)
-            
+            project = get_project()
+            track = project.tracks[track_index]
+            fx_index = track.add_fx(fx_name)
             if fx_index < 0:
-                return {
-                    "success": False,
-                    "error": f"VST instrument not found: {vst_name}"
-                }
-            
-            # Get the FX
+                return {"success": False, "error": f"Plugin not found: '{fx_name}'"}
             fx = track.fxs[fx_index]
-            
-            # Configure track for MIDI input
-            track.input_mode = reapy.InputMode.ALL_MIDI
-            
             return {
                 "success": True,
-                "fx_id": fx.id,
-                "index": fx_index,
+                "fx_index": fx_index,
                 "name": fx.name,
-                "track_id": track_id,
-                "preset": fx.preset_name
+                "n_params": fx.n_params,
+                "track_index": track_index,
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def add_vst_effect(self, track_id, vst_name):
+            logger.error(f"add_fx failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def remove_fx(track_index: int, fx_index: int) -> dict:
+        """Remove an FX plugin from a track by its index."""
+        try:
+            project = get_project()
+            track = project.tracks[track_index]
+            fx_name = track.fxs[fx_index].name
+            RPR.TrackFX_Delete(track.id, fx_index)
+            return {"success": True, "track_index": track_index, "removed": fx_name}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def set_fx_parameter(
+        track_index: int, fx_index: int, param_index: int, value: float
+    ) -> dict:
         """
-        Add a VST effect to the specified track.
-        
-        Args:
-            track_id (int): Track ID
-            vst_name (str): VST effect name
-            
-        Returns:
-            dict: FX information
+        Set a normalized parameter value (0.0–1.0) on an FX plugin.
+        Use get_fx_parameters to discover available parameters and their indices.
         """
         try:
-            # Get track by ID
-            track = reapy.Track.from_id(track_id)
-            
-            # Add VST effect
-            fx_index = track.add_fx(vst_name)
-            
-            if fx_index < 0:
-                return {
-                    "success": False,
-                    "error": f"VST effect not found: {vst_name}"
-                }
-            
-            # Get the FX
+            project = get_project()
+            track = project.tracks[track_index]
             fx = track.fxs[fx_index]
-            
-            return {
-                "success": True,
-                "fx_id": fx.id,
-                "index": fx_index,
-                "name": fx.name,
-                "track_id": track_id,
-                "preset": fx.preset_name
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def set_vst_parameter(self, track_id, fx_id, param_index, value):
-        """
-        Set a parameter value for the specified VST.
-        
-        Args:
-            track_id (int): Track ID
-            fx_id (int): FX ID
-            param_index (int): Parameter index
-            value (float): Parameter value (normalized 0.0-1.0)
-            
-        Returns:
-            dict: Result of the operation
-        """
-        try:
-            # Get track by ID
-            track = reapy.Track.from_id(track_id)
-            
-            # Find FX by ID
-            fx = None
-            for i in range(track.n_fxs):
-                current_fx = track.fxs[i]
-                if current_fx.id == fx_id:
-                    fx = current_fx
-                    break
-            
-            if fx is None:
-                return {
-                    "success": False,
-                    "error": f"FX with ID {fx_id} not found on track {track_id}"
-                }
-            
-            # Set parameter value
             fx.params[param_index].normalized_value = value
-            
-            # Get parameter name
             param_name = fx.params[param_index].name
-            
             return {
                 "success": True,
-                "fx_id": fx_id,
+                "track_index": track_index,
+                "fx_index": fx_index,
                 "param_index": param_index,
                 "param_name": param_name,
                 "value": value,
-                "track_id": track_id
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def get_fx_parameters(self, track_id, fx_id):
-        """
-        Get all parameters for the specified FX.
-        
-        Args:
-            track_id (int): Track ID
-            fx_id (int): FX ID
-            
-        Returns:
-            dict: FX parameters
-        """
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def get_fx_parameters(track_index: int, fx_index: int) -> dict:
+        """Get all parameters for an FX plugin, including names, indices, and current values."""
         try:
-            # Get track by ID
-            track = reapy.Track.from_id(track_id)
-            
-            # Find FX by ID
-            fx = None
-            for i in range(track.n_fxs):
-                current_fx = track.fxs[i]
-                if current_fx.id == fx_id:
-                    fx = current_fx
-                    break
-            
-            if fx is None:
-                return {
-                    "success": False,
-                    "error": f"FX with ID {fx_id} not found on track {track_id}"
-                }
-            
-            # Get parameters
+            project = get_project()
+            track = project.tracks[track_index]
+            fx = track.fxs[fx_index]
             params = []
             for i in range(fx.n_params):
                 param = fx.params[i]
                 params.append({
                     "index": i,
                     "name": param.name,
-                    "value": param.normalized_value,
-                    "formatted_value": param.formatted_value
+                    "normalized_value": param.normalized_value,
+                    "formatted_value": param.formatted_value,
                 })
-            
             return {
                 "success": True,
-                "fx_id": fx_id,
-                "name": fx.name,
-                "track_id": track_id,
-                "preset": fx.preset_name,
-                "parameters": params
+                "track_index": track_index,
+                "fx_index": fx_index,
+                "fx_name": fx.name,
+                "parameters": params,
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def load_fx_preset(self, track_id, fx_id, preset_name):
-        """
-        Load a preset for the specified FX.
-        
-        Args:
-            track_id (int): Track ID
-            fx_id (int): FX ID
-            preset_name (str): Preset name
-            
-        Returns:
-            dict: Result of the operation
-        """
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def list_track_fx(track_index: int) -> dict:
+        """List all FX plugins on a track."""
         try:
-            # Get track by ID
-            track = reapy.Track.from_id(track_id)
-            
-            # Find FX by ID
-            fx = None
+            project = get_project()
+            track = project.tracks[track_index]
+            fx_list = []
             for i in range(track.n_fxs):
-                current_fx = track.fxs[i]
-                if current_fx.id == fx_id:
-                    fx = current_fx
-                    break
-            
-            if fx is None:
-                return {
-                    "success": False,
-                    "error": f"FX with ID {fx_id} not found on track {track_id}"
-                }
-            
-            # Load preset
-            fx.preset_name = preset_name
-            
-            return {
-                "success": True,
-                "fx_id": fx_id,
-                "name": fx.name,
-                "track_id": track_id,
-                "preset": fx.preset_name
-            }
+                fx = track.fxs[i]
+                fx_list.append({
+                    "index": i,
+                    "name": fx.name,
+                    "enabled": fx.is_enabled,
+                    "n_params": fx.n_params,
+                })
+            return {"success": True, "track_index": track_index, "fx": fx_list}
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def list_available_vsts(self, vst_type="all"):
-        """
-        List all available VSTs of the specified type.
-        
-        Args:
-            vst_type (str): VST type (all, instrument, effect)
-            
-        Returns:
-            dict: List of available VSTs
-        """
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def bypass_fx(track_index: int, fx_index: int, bypassed: bool) -> dict:
+        """Enable or bypass (disable) an FX plugin on a track."""
         try:
-            # Use REAPER's built-in function to get VST list
-            # This is a simplified implementation - in practice, you'd need to parse
-            # REAPER's FX browser or use a more complex approach
-            
-            # For now, return some common VSTs as an example
-            common_instruments = [
-                "ReaSynth",
-                "ReaSamplOmatic5000",
-                "VSTi: Surge XT (Surge Synth Team)",
-                "VSTi: Vital (Vital)",
-                "VSTi: TAL-NoiseMaker (Togu Audio Line)"
-            ]
-            
-            common_effects = [
-                "ReaEQ",
-                "ReaComp",
-                "ReaDelay",
-                "ReaVerb",
-                "VST: FabFilter Pro-Q 3 (FabFilter)",
-                "VST: Valhalla VintageVerb (Valhalla DSP)",
-                "VST: Soundtoys EchoBoy (Soundtoys)"
-            ]
-            
-            if vst_type.lower() == "instrument":
-                vsts = common_instruments
-            elif vst_type.lower() == "effect":
-                vsts = common_effects
-            else:
-                vsts = common_instruments + common_effects
-            
+            project = get_project()
+            track = project.tracks[track_index]
+            fx = track.fxs[fx_index]
+            fx.is_enabled = not bypassed
             return {
                 "success": True,
-                "vst_type": vst_type,
-                "vsts": vsts
+                "track_index": track_index,
+                "fx_index": fx_index,
+                "fx_name": fx.name,
+                "bypassed": bypassed,
             }
         except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def load_fx_preset(track_index: int, fx_index: int, preset_name: str) -> dict:
+        """Load a saved preset by name for an FX plugin."""
+        try:
+            project = get_project()
+            track = project.tracks[track_index]
+            fx = track.fxs[fx_index]
+            fx.preset_name = preset_name
             return {
-                "success": False,
-                "error": str(e)
+                "success": True,
+                "track_index": track_index,
+                "fx_index": fx_index,
+                "fx_name": fx.name,
+                "preset": fx.preset_name,
             }
+        except Exception as e:
+            return {"success": False, "error": str(e)}

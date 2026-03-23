@@ -1,195 +1,126 @@
 import os
-from pathlib import Path
 import time
+import logging
+from pathlib import Path
 
 import reapy
 from reapy import reascript_api as RPR
 
+from reaper_mcp.connection import get_project
 
-class ProjectTools:
-    """Tools for managing REAPER projects."""
-    
-    def __init__(self, config):
-        """
-        Initialize ProjectTools with configuration.
-        
-        Args:
-            config (dict): Configuration dictionary
-        """
-        self.config = config
-        self.default_project_dir = Path(config["default_project_directory"])
-        
-        # Create default project directory if it doesn't exist
-        os.makedirs(self.default_project_dir, exist_ok=True)
-    
-    def create_new_project(self, tempo=None, time_signature=None, name=None):
-        """
-        Create a new REAPER project with specified parameters.
-        
-        Args:
-            tempo (float, optional): Project tempo in BPM
-            time_signature (str, optional): Time signature (e.g., "4/4")
-            name (str, optional): Project name
-            
-        Returns:
-            dict: Project information
-        """
+logger = logging.getLogger("reaper_mcp.project_tools")
+
+
+def register_tools(mcp):
+
+    @mcp.tool()
+    def create_project(tempo: float = 120.0, time_signature: str = "4/4", name: str = "") -> dict:
+        """Create a new REAPER project with the given tempo and time signature."""
         try:
-            # Use default values from config if not specified
-            tempo = tempo or self.config["default_tempo"]
-            time_signature = time_signature or self.config["default_time_signature"]
-            name = name or f"New Project {time.strftime('%Y-%m-%d %H-%M-%S')}"
-            
-            # Create new project
-            RPR.Main_OnCommand(41929, 0)  # New project command
-            
-            # Get project
-            project = reapy.Project()
-            
-            # Set project parameters
+            RPR.Main_OnCommand(41929, 0)  # File: New project
+            project = get_project()
             project.bpm = tempo
-            
-            # Set time signature
             if time_signature:
-                num, denom = map(int, time_signature.split('/'))
+                num, denom = map(int, time_signature.split("/"))
                 project.time_signature = (num, denom)
-            
-            # Return project info
             return {
                 "success": True,
-                "project_id": project.id,
-                "name": name,
+                "name": name or f"New Project {time.strftime('%Y-%m-%d %H-%M-%S')}",
                 "tempo": project.bpm,
-                "time_signature": f"{project.time_signature[0]}/{project.time_signature[1]}"
+                "time_signature": time_signature,
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def save_project(self, project_path=""):
-        """
-        Save the current project to the specified path.
-        
-        Args:
-            project_path (str, optional): Path to save the project
-            
-        Returns:
-            dict: Result of the save operation
-        """
+            logger.error(f"create_project failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def save_project(project_path: str = "") -> dict:
+        """Save the current project. If no path is given, saves to ~/Documents/REAPER Projects."""
         try:
-            project = reapy.Project()
-            
-            # If no path specified, use default directory with project name
+            project = get_project()
             if not project_path:
-                project_name = project.name or f"Project {time.strftime('%Y-%m-%d %H-%M-%S')}"
-                project_path = os.path.join(self.default_project_dir, f"{project_name}.rpp")
-            
-            # Ensure directory exists
+                proj_name = project.name or f"Project {time.strftime('%Y-%m-%d %H-%M-%S')}"
+                default_dir = Path.home() / "Documents" / "REAPER Projects"
+                os.makedirs(default_dir, exist_ok=True)
+                project_path = str(default_dir / f"{proj_name}.rpp")
             os.makedirs(os.path.dirname(os.path.abspath(project_path)), exist_ok=True)
-            
-            # Save project
             project.save(project_path)
-            
-            return {
-                "success": True,
-                "project_path": project_path
-            }
+            return {"success": True, "project_path": project_path}
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def load_project(self, project_path):
-        """
-        Load a REAPER project from the specified path.
-        
-        Args:
-            project_path (str): Path to the project file
-            
-        Returns:
-            dict: Result of the load operation
-        """
+            logger.error(f"save_project failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def load_project(project_path: str) -> dict:
+        """Load a REAPER project (.rpp) from the given file path."""
         try:
-            # Check if file exists
             if not os.path.exists(project_path):
-                return {
-                    "success": False,
-                    "error": f"Project file not found: {project_path}"
-                }
-            
-            # Load project
+                return {"success": False, "error": f"File not found: {project_path}"}
             RPR.Main_openProject(project_path)
-            
-            # Get project info
-            project = reapy.Project()
-            
+            project = get_project()
             return {
                 "success": True,
-                "project_id": project.id,
                 "name": project.name,
                 "tempo": project.bpm,
                 "time_signature": f"{project.time_signature[0]}/{project.time_signature[1]}",
-                "project_path": project_path
+                "project_path": project_path,
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def get_project_info(self):
-        """
-        Get information about the current project.
-        
-        Returns:
-            dict: Project information
-        """
+            logger.error(f"load_project failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def get_project_info() -> dict:
+        """Get information about the current project: name, path, tempo, tracks, length."""
         try:
-            project = reapy.Project()
-            
-            # Get track count
-            track_count = project.n_tracks
-            
-            # Get project length
-            length = project.length
-            
-            # Get markers
+            project = get_project()
             markers = []
-            for i in range(project.n_markers):
-                marker = project.get_marker(i)
-                markers.append({
-                    "index": i,
-                    "name": marker.name,
-                    "position": marker.position
-                })
-            
-            # Get regions
+            try:
+                for i in range(project.n_markers):
+                    m = project.markers[i]
+                    markers.append({"index": i, "name": m.name, "position": m.position})
+            except Exception:
+                pass
+
             regions = []
-            for i in range(project.n_regions):
-                region = project.get_region(i)
-                regions.append({
-                    "index": i,
-                    "name": region.name,
-                    "start": region.start,
-                    "end": region.end
-                })
-            
+            try:
+                for i in range(project.n_regions):
+                    r = project.regions[i]
+                    regions.append({"index": i, "name": r.name, "start": r.start, "end": r.end})
+            except Exception:
+                pass
+
             return {
                 "success": True,
                 "name": project.name,
                 "path": project.path,
                 "tempo": project.bpm,
                 "time_signature": f"{project.time_signature[0]}/{project.time_signature[1]}",
-                "length": length,
-                "track_count": track_count,
+                "length": project.length,
+                "track_count": project.n_tracks,
                 "markers": markers,
-                "regions": regions
+                "regions": regions,
             }
         except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            logger.error(f"get_project_info failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def set_tempo(bpm: float) -> dict:
+        """Set the project tempo in BPM."""
+        try:
+            project = get_project()
+            project.bpm = bpm
+            return {"success": True, "tempo": project.bpm}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def set_time_signature(numerator: int, denominator: int) -> dict:
+        """Set the project time signature, e.g. 4/4, 3/4, 6/8."""
+        try:
+            project = get_project()
+            project.time_signature = (numerator, denominator)
+            return {"success": True, "time_signature": f"{numerator}/{denominator}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
