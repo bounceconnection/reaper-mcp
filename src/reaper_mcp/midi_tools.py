@@ -45,17 +45,35 @@ NOTE_TO_NUMBER = {
 
 
 def _parse_chord(chord_str: str):
-    """Return (intervals_list, root_semitone) for a chord string like 'Cm7', 'G', 'F#maj7'."""
+    """Return (intervals_list, root_semitone, warnings) for a chord string
+    like 'Cm7', 'G', 'F#maj7'.
+
+    warnings: list of human-readable strings describing any fallbacks applied
+    (unknown root defaulted to C, unknown chord type defaulted to major).
+    """
     chord_str = chord_str.strip()
+    if not chord_str:
+        return CHORD_TYPES["maj"], 0, ["empty chord string; defaulted to C major"]
+
     if len(chord_str) >= 2 and chord_str[1] in ("#", "b"):
         root = chord_str[:2]
         chord_type = chord_str[2:] or "maj"
     else:
         root = chord_str[:1]
         chord_type = chord_str[1:] or "maj"
+
+    warnings: list[str] = []
+    if chord_type not in CHORD_TYPES:
+        warnings.append(
+            f"unknown chord type '{chord_type}' in '{chord_str}'; defaulted to major"
+        )
+    if root not in NOTE_TO_NUMBER:
+        warnings.append(
+            f"unknown root '{root}' in '{chord_str}'; defaulted to C"
+        )
     intervals = CHORD_TYPES.get(chord_type, CHORD_TYPES["maj"])
     root_num = NOTE_TO_NUMBER.get(root, 0)
-    return intervals, root_num
+    return intervals, root_num, warnings
 
 
 def register_tools(mcp):
@@ -148,10 +166,14 @@ def register_tools(mcp):
             item = track.add_midi_item(start_position, start_position + total_length)
             take = item.active_take
             added_chords = []
+            skipped: list[dict] = []
+            warnings: list[str] = []
 
             for i, chord_str in enumerate(chord_list):
                 try:
-                    intervals, root_num = _parse_chord(chord_str)
+                    intervals, root_num, chord_warnings = _parse_chord(chord_str)
+                    for w in chord_warnings:
+                        warnings.append(w)
                     chord_start = i * chord_length
                     for interval in intervals:
                         note_num = 60 + root_num + interval
@@ -169,11 +191,14 @@ def register_tools(mcp):
                     })
                 except Exception as e:
                     logger.warning(f"Skipping chord '{chord_str}': {e}")
+                    skipped.append({"chord": chord_str, "error": str(e)})
 
             return {
                 "success": True,
                 "item_id": item.id,
                 "chords": added_chords,
+                "skipped": skipped,
+                "warnings": warnings,
                 "start_position": start_position,
                 "total_length": total_length,
             }
@@ -197,6 +222,13 @@ def register_tools(mcp):
         All drum notes are placed on MIDI channel 9 (GM standard).
         """
         try:
+            if not pattern:
+                return {"success": False, "error": "pattern must be a non-empty string"}
+            if beats <= 0:
+                return {"success": False, "error": "beats must be positive"}
+            if repeats <= 0:
+                return {"success": False, "error": "repeats must be positive"}
+
             project = get_project()
             track = project.tracks[track_index]
             seconds_per_beat = 60.0 / project.bpm

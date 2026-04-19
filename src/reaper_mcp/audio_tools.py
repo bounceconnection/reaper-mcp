@@ -49,7 +49,9 @@ def register_tools(mcp):
         try:
             project = get_project()
             track = project.tracks[track_index]
-            track.armed = True
+            # reapy's Track has no `armed`/`is_armed` attribute — use the raw
+            # RPR info value instead.
+            RPR.SetMediaTrackInfo_Value(track.id, "I_RECARM", 1)
             RPR.Main_OnCommand(1013, 0)  # Transport: Record
             return {
                 "success": True,
@@ -57,6 +59,7 @@ def register_tools(mcp):
                 "message": "Recording started. Call stop_transport to stop.",
             }
         except Exception as e:
+            logger.error(f"start_recording failed: {e}")
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
@@ -112,16 +115,26 @@ def register_tools(mcp):
                 item.length -= start_trim
                 take = item.active_take
                 if take:
-                    take.start_offset += start_trim
+                    # reapy's Take.start_offset has no setter — use the raw
+                    # take info value instead. D_STARTOFFS is the source
+                    # offset (in seconds) where the take begins reading.
+                    current_offset = RPR.GetMediaItemTakeInfo_Value(
+                        take.id, "D_STARTOFFS"
+                    )
+                    RPR.SetMediaItemTakeInfo_Value(
+                        take.id, "D_STARTOFFS", current_offset + start_trim
+                    )
 
             if end_trim > 0:
                 item.length -= end_trim
 
+            # reapy's Item has no fade_in_length / fade_out_length properties —
+            # set the REAPER item info values directly.
             if fade_in > 0:
-                item.fade_in_length = fade_in
+                RPR.SetMediaItemInfo_Value(item.id, "D_FADEINLEN", fade_in)
 
             if fade_out > 0:
-                item.fade_out_length = fade_out
+                RPR.SetMediaItemInfo_Value(item.id, "D_FADEOUTLEN", fade_out)
 
             return {
                 "success": True,
@@ -141,14 +154,18 @@ def register_tools(mcp):
             track = project.tracks[track_index]
             item = track.items[item_index]
             take = item.active_take
-            take.pitch = semitones
+            if take is None:
+                return {"success": False, "error": "Item has no active take"}
+            # reapy's Take has no `pitch` setter — go through RPR.
+            RPR.SetMediaItemTakeInfo_Value(take.id, "D_PITCH", semitones)
             return {
                 "success": True,
                 "track_index": track_index,
                 "item_index": item_index,
-                "pitch_semitones": take.pitch,
+                "pitch_semitones": RPR.GetMediaItemTakeInfo_Value(take.id, "D_PITCH"),
             }
         except Exception as e:
+            logger.error(f"adjust_pitch failed: {e}")
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
@@ -159,12 +176,16 @@ def register_tools(mcp):
             track = project.tracks[track_index]
             item = track.items[item_index]
             take = item.active_take
-            take.playback_rate = rate
+            if take is None:
+                return {"success": False, "error": "Item has no active take"}
+            # reapy's Take has no `playback_rate` setter — go through RPR.
+            RPR.SetMediaItemTakeInfo_Value(take.id, "D_PLAYRATE", rate)
             return {
                 "success": True,
                 "track_index": track_index,
                 "item_index": item_index,
-                "playback_rate": take.playback_rate,
+                "playback_rate": RPR.GetMediaItemTakeInfo_Value(take.id, "D_PLAYRATE"),
             }
         except Exception as e:
+            logger.error(f"adjust_playback_rate failed: {e}")
             return {"success": False, "error": str(e)}

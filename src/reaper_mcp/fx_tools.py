@@ -21,13 +21,11 @@ def register_tools(mcp):
         try:
             project = get_project()
             track = project.tracks[track_index]
-            fx_index = track.add_fx(fx_name)
-            if fx_index < 0:
-                return {"success": False, "error": f"Plugin not found: '{fx_name}'"}
-            fx = track.fxs[fx_index]
+            fx = track.add_fx(fx_name)
+            fx_idx = list(track.fxs).index(fx)
             return {
                 "success": True,
-                "fx_index": fx_index,
+                "fx_index": fx_idx,
                 "name": fx.name,
                 "n_params": fx.n_params,
                 "track_index": track_index,
@@ -59,16 +57,17 @@ def register_tools(mcp):
         try:
             project = get_project()
             track = project.tracks[track_index]
-            fx = track.fxs[fx_index]
-            fx.params[param_index].normalized_value = value
-            param_name = fx.params[param_index].name
+            RPR.TrackFX_SetParamNormalized(track.id, fx_index, param_index, value)
+            # Read back via RPR to confirm
+            result = RPR.TrackFX_GetParamNormalized(track.id, fx_index, param_index)
+            name = RPR.TrackFX_GetParamName(track.id, fx_index, param_index, "", 2048)[4]
             return {
                 "success": True,
                 "track_index": track_index,
                 "fx_index": fx_index,
                 "param_index": param_index,
-                "param_name": param_name,
-                "value": value,
+                "param_name": name,
+                "value": result,
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -79,21 +78,35 @@ def register_tools(mcp):
         try:
             project = get_project()
             track = project.tracks[track_index]
-            fx = track.fxs[fx_index]
+            n_params = RPR.TrackFX_GetNumParams(track.id, fx_index)
+            fx_name = RPR.TrackFX_GetFXName(track.id, fx_index, "", 2048)[3]
             params = []
-            for i in range(fx.n_params):
-                param = fx.params[i]
+            for i in range(n_params):
+                name = RPR.TrackFX_GetParamName(track.id, fx_index, i, "", 2048)[4]
+                norm_val = RPR.TrackFX_GetParamNormalized(track.id, fx_index, i)
+                # TrackFX_GetParam returns:
+                #   (retval, track_id, fx_idx, param_idx, minvalOut, maxvalOut)
+                # so the current value is [0] and min/max are [4] and [5].
+                # The previous [:3] slice put the track pointer into min_val
+                # and the fx index into max_val.
+                param_result = RPR.TrackFX_GetParam(track.id, fx_index, i, 0, 0)
+                raw_val = param_result[0]
+                min_val = param_result[4]
+                max_val = param_result[5]
+                formatted = RPR.TrackFX_GetFormattedParamValue(track.id, fx_index, i, "", 2048)[4]
                 params.append({
                     "index": i,
-                    "name": param.name,
-                    "normalized_value": param.normalized_value,
-                    "formatted_value": param.formatted_value,
+                    "name": name,
+                    "value": raw_val,
+                    "normalized_value": norm_val,
+                    "formatted_value": formatted,
+                    "range": [min_val, max_val],
                 })
             return {
                 "success": True,
                 "track_index": track_index,
                 "fx_index": fx_index,
-                "fx_name": fx.name,
+                "fx_name": fx_name,
                 "parameters": params,
             }
         except Exception as e:
@@ -143,13 +156,17 @@ def register_tools(mcp):
             project = get_project()
             track = project.tracks[track_index]
             fx = track.fxs[fx_index]
-            fx.preset_name = preset_name
+            # reapy's FX exposes `preset` (not `preset_name`) as the settable
+            # attribute. `preset` accepts a preset name, a path to a
+            # .vstpreset file, or an int preset index.
+            fx.preset = preset_name
             return {
                 "success": True,
                 "track_index": track_index,
                 "fx_index": fx_index,
                 "fx_name": fx.name,
-                "preset": fx.preset_name,
+                "preset": fx.preset,
             }
         except Exception as e:
+            logger.error(f"load_fx_preset failed: {e}")
             return {"success": False, "error": str(e)}
