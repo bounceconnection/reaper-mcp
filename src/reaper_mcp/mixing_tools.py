@@ -14,57 +14,102 @@ def _db_to_linear(db: float) -> float:
     return 10 ** (db / 20.0)
 
 
+def _scale_to_envelope(envelope, natural_value: float) -> float:
+    """Convert a 'natural' value (linear amplitude for volume, -1..1 for pan)
+    into the envelope's native internal representation.
+
+    REAPER envelopes can be in either 'no scaling' (mode 0 — raw natural
+    value) or 'fader scaling' (mode 1 — fader-curve-mapped). InsertEnvelopePoint
+    expects values in the envelope's native units, not natural units. Skipping
+    this conversion is what causes "two points at +1 dB rendering as silence"
+    in fader-scaling mode: the raw 1.122 gets interpreted as a fader position,
+    and the static fader is overridden by the envelope.
+    """
+    try:
+        mode = RPR.GetEnvelopeScalingMode(envelope)
+        if mode:
+            return RPR.ScaleToEnvelopeMode(mode, natural_value)
+    except Exception as e:
+        logger.debug(f"ScaleToEnvelopeMode unavailable, using raw value: {e}")
+    return natural_value
+
+
+def _ensure_envelope(track, env_name: str, toggle_action_id: int):
+    """Return the named track envelope, creating/showing it if it doesn't
+    already exist. A freshly-visible envelope is what gets serialized into
+    the track state chunk on save — without this, InsertEnvelopePoint writes
+    to a phantom envelope that affects render but not save_project.
+    """
+    env = RPR.GetTrackEnvelopeByName(track.id, env_name)
+    if env:
+        return env
+    # Select only this track so the "toggle envelope visible" action targets it.
+    RPR.SetOnlyTrackSelected(track.id)
+    RPR.Main_OnCommand(toggle_action_id, 0)
+    return RPR.GetTrackEnvelopeByName(track.id, env_name)
+
+
 def register_tools(mcp):
 
     @mcp.tool()
     def add_volume_automation(track_index: int, position: float, value_db: float) -> dict:
-        """
-        Add a volume automation point on a track.
-        The volume envelope must be visible in REAPER (right-click track > Show envelope).
+        """Add a volume automation point on a track.
+
+        If the track's Volume envelope isn't visible yet, it is auto-toggled
+        visible (REAPER action 40406) so the points persist through save.
+
         position: time in seconds. value_db: volume level in dB.
         """
         try:
             project = get_project()
             track = project.tracks[track_index]
-            envelope = RPR.GetTrackEnvelopeByName(track.id, "Volume")
+            # 40406 = "Track: Toggle track volume envelope visible"
+            envelope = _ensure_envelope(track, "Volume", 40406)
             if not envelope:
                 return {
                     "success": False,
                     "error": (
-                        "Volume envelope not found. Show it first: right-click the track "
-                        "in REAPER and choose 'Show envelope for track volume'."
+                        "Could not find or create the Volume envelope. Make sure "
+                        "the track exists and is not locked."
                     ),
                 }
             linear_val = _db_to_linear(value_db)
-            RPR.InsertEnvelopePoint(envelope, position, linear_val, 0, 0, False, True)
+            env_val = _scale_to_envelope(envelope, linear_val)
+            RPR.InsertEnvelopePoint(envelope, position, env_val, 0, 0, False, True)
             RPR.Envelope_SortPoints(envelope)
             return {"success": True, "track_index": track_index, "position": position, "value_db": value_db}
         except Exception as e:
+            logger.error(f"add_volume_automation failed: {e}")
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
     def add_pan_automation(track_index: int, position: float, pan: float) -> dict:
-        """
-        Add a pan automation point on a track.
-        The pan envelope must be visible in REAPER.
+        """Add a pan automation point on a track.
+
+        If the Pan envelope isn't visible yet, it is auto-toggled visible
+        (REAPER action 40407) so the points persist through save.
+
         pan: -1.0 (full left) to 1.0 (full right).
         """
         try:
             project = get_project()
             track = project.tracks[track_index]
-            envelope = RPR.GetTrackEnvelopeByName(track.id, "Pan")
+            # 40407 = "Track: Toggle track pan envelope visible"
+            envelope = _ensure_envelope(track, "Pan", 40407)
             if not envelope:
                 return {
                     "success": False,
                     "error": (
-                        "Pan envelope not found. Show it first: right-click the track "
-                        "in REAPER and choose 'Show envelope for track pan'."
+                        "Could not find or create the Pan envelope. Make sure "
+                        "the track exists and is not locked."
                     ),
                 }
-            RPR.InsertEnvelopePoint(envelope, position, pan, 0, 0, False, True)
+            env_val = _scale_to_envelope(envelope, pan)
+            RPR.InsertEnvelopePoint(envelope, position, env_val, 0, 0, False, True)
             RPR.Envelope_SortPoints(envelope)
             return {"success": True, "track_index": track_index, "position": position, "pan": pan}
         except Exception as e:
+            logger.error(f"add_pan_automation failed: {e}")
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
